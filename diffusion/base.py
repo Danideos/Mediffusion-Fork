@@ -1,6 +1,7 @@
 import numpy as np
 import enum
 import torch
+import cv2
 
 from mediffusion.utils.diffusion import get_named_beta_schedule
 from mediffusion.losses.diffusion import normal_kl, discretized_gaussian_log_likelihood
@@ -152,6 +153,25 @@ class GaussianDiffusionBase(torch.nn.Module):
         res_1 = self._extract_into_tensor(arr, timesteps.floor().long(), broadcast_shape)
         res_2 = self._extract_into_tensor(arr, timesteps.ceil().long(), broadcast_shape)
         return torch.lerp(res_1, res_2, frac)
+    
+    def q_sample_xt_given_xtm1(self, x_tm1, t):
+        """
+        Sample from q(x_t | x_{t-1}).
+        :param x_tm1: the [N x C x ...] tensor of inputs at time t-1.
+        :param t: a batch of timestep indices.
+        :return: a tensor sampled from q(x_t | x_{t-1}).
+        """
+        # Mean is sqrt(1 - beta_t) * x_{t-1}
+        beta_t = self._extract_into_tensor(self.betas, t, x_tm1.shape)
+        mean_coef = torch.sqrt(1.0 - beta_t)
+        mean = mean_coef * x_tm1
+        
+        # Variance is beta_t
+        std_dev = torch.sqrt(beta_t)
+        
+        # Sample from Gaussian
+        noise = torch.randn_like(x_tm1)
+        return mean + std_dev * noise
 
 
     def q_sample(self, x_start, t, noise=None):
@@ -363,7 +383,7 @@ class GaussianDiffusionBase(torch.nn.Module):
             "pred_xstart": pred_xstart,
         }
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, concat=None, cond_inp=False):
         """
         Compute training losses for a single timestep.
         :param model: the model to evaluate loss on.
@@ -397,8 +417,12 @@ class GaussianDiffusionBase(torch.nn.Module):
                 terms["loss"] *= self.num_timesteps
 
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+            if cond_inp:
+                normalized_mask = (concat[:, 1, :, :] / 2) + 1
+                normalized_mask_unsqueezed = normalized_mask.unsqueeze(1)
+                x_t = x_t * normalized_mask_unsqueezed + x_start + (1 - normalized_mask_unsqueezed)
 
+            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
             if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
                 B, C = x_t.shape[:2]
                 assert model_output.shape == (B, C * 2, *x_t.shape[2:])
@@ -428,11 +452,47 @@ class GaussianDiffusionBase(torch.nn.Module):
                     x_start=x_start, noise=noise, t=t
                 ),
             }[self.model_mean_type]
+            if cond_inp:
+                target = x_start * (1 - normalized_mask_unsqueezed) + target * normalized_mask_unsqueezed
             assert model_output.shape == target.shape == x_start.shape
 
             # P2 weighting
             weight = self._extract_into_tensor(1 / (self.p2_k + self.snr)**self.p2_gamma, t, target.shape)
-            terms["mse"] = mean_flat(weight * (target - model_output) ** 2)
+            # if concat is not None:
+            #     normalized_mask = (concat[:, 1, :, :] + 1) / 2  # Now, the range is [0, 1]
+
+            #     # Sum over the height and width dimensions for only the first channel (channel index 0)
+            #     N_inpainted = normalized_mask.sum(dim=[1, 2], keepdim=True)  # Resulting shape will be [batch_size, 1, 1]
+
+            #     # Calculate the total number of pixels per image in the batch as a tensor
+            #     N_total = torch.tensor(concat.size(2) * concat.size(3), dtype=torch.float32, device=concat.device).view(1, 1, 1)
+            #     N_total = N_total.expand_as(N_inpainted)  # Make it the same shape as N_inpainted
+
+            #     N_rest = N_total - N_inpainted  # Number of pixels in the rest of the image
+
+            #     # Calculate the normalized weights
+            #     weight_inpainted_normalized = 0.5 * N_rest / N_total
+            #     weight_rest_normalized = 0.5 * N_inpainted / N_total
+
+            #     # Create the weight mask using the inpainted and rest weights
+            #     # Apply the weights to the entire mask (including all channels)
+            #     weight_mask = normalized_mask * weight_inpainted_normalized + (1 - normalized_mask) * weight_rest_normalized
+
+            #     # Apply Gaussian blur to smooth the transition between regions
+            #     blurred_weight_mask = self.gaussian_blur_weight_mask(weight_mask, kernel_size=21, sigma=5)
+
+            #     # Debugging: Print the sum, min, and max of the blurred weight mask
+            #     print(np.sum(blurred_weight_mask.cpu().numpy()), np.min(blurred_weight_mask.cpu().numpy()), np.max(blurred_weight_mask.cpu().numpy()))
+
+            #     # Apply the blurred weight mask to the pixel-wise loss
+            #     weighted_pixel_loss = (target - model_output) ** 2 * blurred_weight_mask
+            # else:
+            #     weighted_pixel_loss = (target - model_output) ** 2
+            weighted_pixel_loss = (target - model_output) ** 2 
+            # if cond_inp:
+            #     weighted_pixel_loss *= normalized_mask_unsqueezed / torch.mean(normalized_mask_unsqueezed)
+
+            terms["mse"] = mean_flat(weight * weighted_pixel_loss)
 
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
@@ -443,6 +503,30 @@ class GaussianDiffusionBase(torch.nn.Module):
 
         return terms
     
+    def gaussian_blur_weight_mask(self, weight_mask, kernel_size=21, sigma=5):
+        # Ensure that the input weight_mask is on CPU because OpenCV functions work with numpy arrays on CPU
+        weight_mask_np = weight_mask.cpu().numpy()  # Convert to numpy (assumes weight_mask is on GPU)
+
+        # Initialize an empty array to store the blurred results, with the same shape as the input
+        blurred_weight_mask_np = np.zeros_like(weight_mask_np)
+
+        # Iterate over the batch and channel dimensions
+        for i in range(weight_mask_np.shape[0]):  # Batch size
+            for j in range(weight_mask_np.shape[1]):  # Number of channels
+                # Extract the 2D slice (height x width)
+                slice_2d = weight_mask_np[i, j]
+
+                # Apply Gaussian blur to the 2D slice
+                blurred_slice = cv2.GaussianBlur(slice_2d, (kernel_size, kernel_size), sigma)
+
+                # Assign the blurred slice back to the corresponding position
+                blurred_weight_mask_np[i, j] = blurred_slice
+
+        # Convert back to a PyTorch tensor and move it to the original device (GPU if applicable)
+        blurred_weight_mask = torch.tensor(blurred_weight_mask_np, dtype=torch.float32).to(weight_mask.device)
+        
+        return blurred_weight_mask
+        
     def condition_mean(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
         """
         Compute the mean for the previous step, given a function cond_fn that

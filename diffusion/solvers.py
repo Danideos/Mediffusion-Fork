@@ -92,7 +92,6 @@ class DDPMSolver(SolverBase):
             indices = list(range(self.num_timesteps))[::-1]
         else:
             indices = list(range(start_denoise_step))[::-1]
-
         for i in tqdm(indices, desc="DDPM Sampling"):
             t = self._get_t(i)
             ts = t.expand(batch_size).to(device=device)
@@ -129,7 +128,7 @@ class DDIMSolver(SolverBase):
     :param kwargs: the kwargs to create the base diffusion process.
     """
 
-    def __init__(self, diffusion, num_steps, eta=0.0):
+    def __init__(self, diffusion, num_steps, eta=0.0, resampling_steps=0, jump_length=0):
         kwargs = extract_diffusion_args(diffusion)
         base_diffusion = GaussianDiffusionBase(**kwargs)
 
@@ -137,6 +136,8 @@ class DDIMSolver(SolverBase):
                     
         self.timestep_map = []
         self.original_num_steps = len(kwargs["betas"])
+        self.resampling_steps = resampling_steps
+        self.jump_length = jump_length
 
         last_alpha_cumprod = 1.0
         new_betas = []
@@ -233,13 +234,13 @@ class DDIMSolver(SolverBase):
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
         
     @torch.no_grad()
-    def sample(self, model, imgs, start_denoise_step=None, cond_scale=1, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None, generator=None, mask=None, original_image=None):
+    def sample(self, model, imgs, start_denoise_step=None, cond_scale=1, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None, generator=None, mask=None, original_image=None, concat=None, cond_inp=False):
         device = self._get_model_device(model)
         dtype = self._get_model_dtype(model)
         
         imgs = imgs.to(device=device, dtype=dtype)
         batch_size = imgs.shape[0]
-
+        
         if start_denoise_step is None:
             indices = list(range(self.num_timesteps))[::-1]
         else:
@@ -253,24 +254,63 @@ class DDIMSolver(SolverBase):
                 x0_noised = self.q_sample(original_image, ts)
                 imgs = imgs * mask + x0_noised * (1 - mask)
                 imgs = imgs.to(device=device, dtype=dtype)
+            
+            # if cond_inp is not None:
+            #     imgs = imgs * mask + original_image * (1 - mask)
+            #     imgs = imgs.to(device=device, dtype=dtype)
+            
+            if mask is not None:
+                out = self._sample_fn(
+                        model,
+                        imgs,
+                        ts,
+                        cond_scale=cond_scale,
+                        clip_denoised=clip_denoised,
+                        denoised_fn=denoised_fn,
+                        cond_fn=cond_fn,
+                        model_kwargs=model_kwargs,
+                        generator=generator,
+                        eta=self.eta,
+                    )
+                imgs = out["sample"].detach().to(dtype=dtype, device=device)
+                for _ in range(self.resampling_steps):
+                    iterations = min(len(indices) - i, self.jump_length)
+                    for j in range(iterations):
+                        imgs = self.q_sample_xt_given_xtm1(imgs, ts + j).detach().to(dtype=dtype, device=device)
 
-            out = self._sample_fn(
-                model,
-                imgs,
-                ts,
-                cond_scale=cond_scale,
-                clip_denoised=clip_denoised,
-                denoised_fn=denoised_fn,
-                cond_fn=cond_fn,
-                model_kwargs=model_kwargs,
-                generator=generator,
-                eta=self.eta,
-            )
-            imgs = out["sample"].detach().to(dtype=dtype, device=device)
+                    for j in range(iterations):
+                        out = self._sample_fn(
+                            model,
+                            imgs,
+                            ts + iterations - j - 1,
+                            cond_scale=cond_scale,
+                            clip_denoised=clip_denoised,
+                            denoised_fn=denoised_fn,
+                            cond_fn=cond_fn,
+                            model_kwargs=model_kwargs,
+                            generator=generator,
+                            eta=self.eta,
+                        )
+                        imgs = out["sample"].detach().to(dtype=dtype, device=device)
+            else:
+                out = self._sample_fn(
+                    model,
+                    imgs,
+                    ts,
+                    cond_scale=cond_scale,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                    generator=generator,
+                    eta=self.eta,
+                )
+                imgs = out["sample"].detach().to(dtype=dtype, device=device)
 
         if mask is not None:
             imgs = imgs * mask + original_image * (1 - mask)
             imgs = imgs.to(device=device, dtype=dtype)
+
 
         return imgs
         

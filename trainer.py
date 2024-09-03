@@ -3,7 +3,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
-import bkh_pytorch_utils as bpu
+import PytorchUtils.bkh_pytorch_utils as bpu
 
 class Trainer:
     def __init__(
@@ -16,8 +16,8 @@ class Trainer:
             nodes=1,
             wandb_project=None,
             logger_instance='mediffusion_experimental_run',
+            accumulate_grad_batches=1
         ):
-        
         # Check if Wandb API key is present
         if 'WANDB_API_KEY' not in os.environ:
             raise EnvironmentError("Wandb API key not found. Please set the WANDB_API_KEY environment variable.")
@@ -34,6 +34,7 @@ class Trainer:
         self.nodes = nodes
         self.logger_instance = logger_instance
         self.wandb_project = wandb_project
+        self.accumulate_grad_batches = accumulate_grad_batches
 
         os.makedirs(f"{self.root_directory}/pl", exist_ok=True)
         os.makedirs(f"{self.root_directory}/wandb", exist_ok=True)
@@ -52,35 +53,37 @@ class Trainer:
         lr_monitor = LearningRateMonitor(logging_interval="step")
         checkpoint_callback1= ModelCheckpoint(
             dirpath=self.root_directory + "/pl",
-            filename=f'{{epoch}}-{{step}}-{{val_loss:0.4F}}',
+            filename=f'{self.logger_instance}-{{epoch}}-{{step}}-{{val_loss:0.6F}}',
             monitor="val_loss",
             mode="min",
             save_last=True,
-            save_top_k=5,
+            save_top_k=2,
         )
 
-        ema = bpu.EMA(decay=0.9999, ema_interval_steps=1, ema_device="cpu", use_ema_for_validation=True)
+        ema = bpu.EMA(decay=0.9999, ema_interval_steps=1, ema_device="cpu", use_ema_for_validation=True, use_warmup=True)
 
         # Setup Trainer
         trainer = pl.Trainer(
+            accumulate_grad_batches=self.accumulate_grad_batches,
             gradient_clip_val=1.0,
             deterministic=True,
-            callbacks=[checkpoint_callback1, lr_monitor, ema],
+            callbacks=[checkpoint_callback1,lr_monitor, ema], 
             profiler='simple',
             logger=wandb_logger,
             precision=self.precision,
             accelerator="gpu",
-            devices=1 if bpu.is_notebook_running() else self.devices,
+            devices=self.devices,
             num_nodes=self.nodes,
-            strategy="auto" if bpu.is_notebook_running() else DDPStrategy(find_unused_parameters=False),
-            log_every_n_steps=10,
+            strategy=DDPStrategy(find_unused_parameters=False),
+            log_every_n_steps=50,
             default_root_dir=self.root_directory,
             num_sanity_val_steps=0,
             fast_dev_run=False,
             max_epochs=-1,
             max_steps=self.max_steps,
-            use_distributed_sampler=bpu.is_notebook_running() is False and self.devices != 1,
-            val_check_interval=self.val_check_interval,
+            use_distributed_sampler=True,
+            val_check_interval=self.val_check_interval
+            # check_val_every_n_epoch=self.val_check_interval,
         )
         return trainer
 

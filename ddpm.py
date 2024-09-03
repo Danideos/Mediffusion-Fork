@@ -6,7 +6,7 @@ from .models.unet import UNetModel
 import os
 import torch
 import numpy as np
-import bkh_pytorch_utils as bpu
+import PytorchUtils.bkh_pytorch_utils as bpu
 from tqdm import tqdm
 import torchextractor as tx
 from functools import partial
@@ -38,7 +38,6 @@ class DiffusionModule(bpu.BKhModule):
             batch_size=batch_size, 
             val_batch_size=val_batch_size
         )
-
         current_file_path = os.path.abspath(__file__)
         current_directory = os.path.dirname(current_file_path)
         default_config_file = os.path.join(current_directory, 'default_config', 'default.yaml')
@@ -151,7 +150,7 @@ class DiffusionModule(bpu.BKhModule):
         
         model_kwargs = {"cls": cls, "concat": concat}
 
-        loss_terms = self.diffusion.training_losses(model=self.model, x_start=x_start, t=ts, noise=noise, model_kwargs=model_kwargs)
+        loss_terms = self.diffusion.training_losses(model=self.model, x_start=x_start, t=ts, noise=noise, model_kwargs=model_kwargs, concat=concat, cond_inp=True)
 
         self.log(f'train_loss', loss_terms['loss'].mean(), on_epoch=True, on_step=True, prog_bar=False)
 
@@ -170,7 +169,7 @@ class DiffusionModule(bpu.BKhModule):
         if batch_idx == 0:
             assert len(x_start.shape)==4 or (len(x_start.shape)==5 and batch_size==1), f"expected 2D image (with any batch size) or 3D image (with batch size 1), got {x_start.shape}"
 
-            imgs = self.predict(noise, inference_protocol=self.config.validation.protocol, model_kwargs=model_kwargs, classifier_cond_scale=self.config.validation.classifier_cond_scale)
+            imgs = self.predict(noise, inference_protocol=self.config.validation.protocol, model_kwargs=model_kwargs, classifier_cond_scale=self.config.validation.classifier_cond_scale, original_image=x_start, concat=concat, cond_inp=True)
             
             if self.config.validation.log_original:
                 x_start_list = x_start.cpu().split(1, dim=0)
@@ -187,7 +186,7 @@ class DiffusionModule(bpu.BKhModule):
         
         ts, t_weights = self.timestep_scheduler.sample(batch_size=batch_size, device=x_start.device)
         
-        loss_terms = self.diffusion.training_losses(model=self.model, x_start=x_start, t=ts, noise=noise, model_kwargs=model_kwargs)
+        loss_terms = self.diffusion.training_losses(model=self.model, x_start=x_start, t=ts, noise=noise, model_kwargs=model_kwargs, concat=concat, cond_inp=True)
 
         self.log(f'val_loss', loss_terms['loss'].mean(), on_epoch=True, on_step=False, prog_bar=False)
 
@@ -224,7 +223,7 @@ class DiffusionModule(bpu.BKhModule):
             self.logger.log_image(key=title, images=imgs_to_log)
 
     @torch.inference_mode()
-    def predict(self, init_noise, inference_protocol="DDPM", model_kwargs={}, classifier_cond_scale=0, generator=None, mask=None, original_image=None, start_denoise_step=None, post_process_fn=None, clip_denoised=True, eta=0.0):            
+    def predict(self, init_noise, inference_protocol="DDPM", model_kwargs={}, classifier_cond_scale=0, generator=None, mask=None, original_image=None, start_denoise_step=None, post_process_fn=None, clip_denoised=True, eta=0.0, resampling_steps=1, jump_length=1, concat=None, cond_inp=True):            
         init_noise = init_noise.to(device=self.device, dtype=self.dtype)
 
         for key in model_kwargs:
@@ -237,12 +236,12 @@ class DiffusionModule(bpu.BKhModule):
             mask = mask.to(device=self.device, dtype=self.dtype)
             original_image = original_image.to(device=self.device, dtype=self.dtype)
             assert mask.shape == init_noise.shape == original_image.shape, f"mask, init_noise and original_image should have the same shape, got {mask.shape}, {init_noise.shape} and {original_image.shape}"
-        
+            
         if inference_protocol == "DDPM":
             solver = DDPMSolver(self.diffusion)
         elif inference_protocol.startswith("DDIM"):
             num_steps = int(inference_protocol[len("DDIM"):])
-            solver = DDIMSolver(self.diffusion, num_steps=num_steps, eta=eta)
+            solver = DDIMSolver(self.diffusion, num_steps=num_steps, eta=eta, resampling_steps=resampling_steps, jump_length=jump_length)
         elif inference_protocol.startswith("IDDIM"):
             num_steps = int(inference_protocol[len("IDDIM"):])
             solver = InverseDDIMSolver(self.diffusion, num_steps=num_steps, eta=0.0)
@@ -251,7 +250,7 @@ class DiffusionModule(bpu.BKhModule):
             solver = PLMSSolver(self.diffusion, num_steps=num_steps)
         else:
             raise ValueError(f"Unknown inference protocol {inference_protocol}, only DDPM, DDIM, IDDIM, PLMS are supported")
-
+       
         imgs = solver.sample(
             self.model,
             init_noise,
@@ -262,6 +261,7 @@ class DiffusionModule(bpu.BKhModule):
             generator=generator,
             mask=mask,
             original_image=original_image,
+            concat=concat
         )
         
         imgs = imgs.split(1, dim=0)                 # [(1, C, H, W, (D))] * B

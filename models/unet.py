@@ -284,7 +284,6 @@ class UNetModel(nn.Module):
             assert (cls is not None) == (
                 self.num_classes > 0
             ), "must specify cls if and only if the model is class-conditional"
-
         assert (concat is None and self.concat_channels == 0) or (concat.shape[1] == self.concat_channels), "Number of concat channels do not match with initialized configuration."
 
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels).to(dtype=x.dtype))
