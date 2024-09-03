@@ -3,9 +3,9 @@ import enum
 import torch
 import cv2
 
-from mediffusion.utils.diffusion import get_named_beta_schedule
-from mediffusion.losses.diffusion import normal_kl, discretized_gaussian_log_likelihood
-from mediffusion.modules.nn import mean_flat
+from ..utils.diffusion import get_named_beta_schedule
+from ..losses.diffusion import normal_kl, discretized_gaussian_log_likelihood
+from ..modules.nn import mean_flat
 
 class ModelMeanType(enum.Enum):
     """

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from mediffusion.modules.nn import (
+from ..modules.nn import (
     conv_nd,
     linear,
     zero_module,
@@ -9,13 +9,13 @@ from mediffusion.modules.nn import (
     timestep_embedding
 )
 
-from mediffusion.modules.res import (
+from ..modules.res import (
     TimestepEmbedSequential,
     Upsample,
     Downsample,
     ResBlock
 )
-from mediffusion.modules.attention import (
+from ..modules.attention import (
     AttentionBlock,
 )
 

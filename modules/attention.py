@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from mediffusion.modules.nn import (
+from .nn import (
     checkpoint,
     conv_nd,
     zero_module,
