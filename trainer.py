@@ -82,8 +82,8 @@ class Trainer:
             max_epochs=-1,
             max_steps=self.max_steps,
             use_distributed_sampler=True,
-            val_check_interval=self.val_check_interval
-            # check_val_every_n_epoch=self.val_check_interval,
+            # val_check_interval=self.val_check_interval
+            check_val_every_n_epoch=self.val_check_interval,
         )
         return trainer
 

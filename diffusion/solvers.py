@@ -234,7 +234,7 @@ class DDIMSolver(SolverBase):
         return {"sample": sample, "pred_xstart": out["pred_xstart"]}
         
     @torch.no_grad()
-    def sample(self, model, imgs, start_denoise_step=None, cond_scale=1, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None, generator=None, mask=None, original_image=None, concat=None, cond_inp=False):
+    def sample(self, model, imgs, start_denoise_step=None, cond_scale=1, clip_denoised=True, denoised_fn=None, cond_fn=None, model_kwargs=None, generator=None, mask=None, original_image=None):
         device = self._get_model_device(model)
         dtype = self._get_model_dtype(model)
         
@@ -254,10 +254,6 @@ class DDIMSolver(SolverBase):
                 x0_noised = self.q_sample(original_image, ts)
                 imgs = imgs * mask + x0_noised * (1 - mask)
                 imgs = imgs.to(device=device, dtype=dtype)
-            
-            # if cond_inp is not None:
-            #     imgs = imgs * mask + original_image * (1 - mask)
-            #     imgs = imgs.to(device=device, dtype=dtype)
             
             if mask is not None:
                 out = self._sample_fn(

@@ -383,7 +383,7 @@ class GaussianDiffusionBase(torch.nn.Module):
             "pred_xstart": pred_xstart,
         }
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, concat=None, cond_inp=False):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
         """
         Compute training losses for a single timestep.
         :param model: the model to evaluate loss on.
@@ -417,11 +417,6 @@ class GaussianDiffusionBase(torch.nn.Module):
                 terms["loss"] *= self.num_timesteps
 
         elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            if cond_inp:
-                normalized_mask = (concat[:, 1, :, :] / 2) + 1
-                normalized_mask_unsqueezed = normalized_mask.unsqueeze(1)
-                x_t = x_t * normalized_mask_unsqueezed + x_start + (1 - normalized_mask_unsqueezed)
-
             model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
             if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
                 B, C = x_t.shape[:2]
@@ -452,46 +447,12 @@ class GaussianDiffusionBase(torch.nn.Module):
                     x_start=x_start, noise=noise, t=t
                 ),
             }[self.model_mean_type]
-            if cond_inp:
-                target = x_start * (1 - normalized_mask_unsqueezed) + target * normalized_mask_unsqueezed
+           
             assert model_output.shape == target.shape == x_start.shape
 
             # P2 weighting
             weight = self._extract_into_tensor(1 / (self.p2_k + self.snr)**self.p2_gamma, t, target.shape)
-            # if concat is not None:
-            #     normalized_mask = (concat[:, 1, :, :] + 1) / 2  # Now, the range is [0, 1]
-
-            #     # Sum over the height and width dimensions for only the first channel (channel index 0)
-            #     N_inpainted = normalized_mask.sum(dim=[1, 2], keepdim=True)  # Resulting shape will be [batch_size, 1, 1]
-
-            #     # Calculate the total number of pixels per image in the batch as a tensor
-            #     N_total = torch.tensor(concat.size(2) * concat.size(3), dtype=torch.float32, device=concat.device).view(1, 1, 1)
-            #     N_total = N_total.expand_as(N_inpainted)  # Make it the same shape as N_inpainted
-
-            #     N_rest = N_total - N_inpainted  # Number of pixels in the rest of the image
-
-            #     # Calculate the normalized weights
-            #     weight_inpainted_normalized = 0.5 * N_rest / N_total
-            #     weight_rest_normalized = 0.5 * N_inpainted / N_total
-
-            #     # Create the weight mask using the inpainted and rest weights
-            #     # Apply the weights to the entire mask (including all channels)
-            #     weight_mask = normalized_mask * weight_inpainted_normalized + (1 - normalized_mask) * weight_rest_normalized
-
-            #     # Apply Gaussian blur to smooth the transition between regions
-            #     blurred_weight_mask = self.gaussian_blur_weight_mask(weight_mask, kernel_size=21, sigma=5)
-
-            #     # Debugging: Print the sum, min, and max of the blurred weight mask
-            #     print(np.sum(blurred_weight_mask.cpu().numpy()), np.min(blurred_weight_mask.cpu().numpy()), np.max(blurred_weight_mask.cpu().numpy()))
-
-            #     # Apply the blurred weight mask to the pixel-wise loss
-            #     weighted_pixel_loss = (target - model_output) ** 2 * blurred_weight_mask
-            # else:
-            #     weighted_pixel_loss = (target - model_output) ** 2
             weighted_pixel_loss = (target - model_output) ** 2 
-            # if cond_inp:
-            #     weighted_pixel_loss *= normalized_mask_unsqueezed / torch.mean(normalized_mask_unsqueezed)
-
             terms["mse"] = mean_flat(weight * weighted_pixel_loss)
 
             if "vb" in terms:
